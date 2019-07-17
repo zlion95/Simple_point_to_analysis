@@ -18,6 +18,7 @@ import soot.Scene;
 import soot.SceneTransformer;
 import soot.SootClass;
 import soot.SootField;
+import soot.SootFieldRef;
 import soot.SootMethod;
 import soot.Unit;
 import soot.Value;
@@ -28,6 +29,7 @@ import soot.jimple.InvokeStmt;
 import soot.jimple.JimpleBody;
 import soot.jimple.NewExpr;
 import soot.jimple.Stmt;
+import soot.jimple.internal.JInstanceFieldRef;
 import soot.jimple.toolkits.callgraph.ReachableMethods;
 import soot.jimple.toolkits.callgraph.Targets;
 import soot.jimple.toolkits.callgraph.TopologicalOrderer;
@@ -54,11 +56,7 @@ public class WholeProgramTransformer extends SceneTransformer {
 	    boolean enableNullPointerCheckInsertion = PhaseOptions.getBoolean(options, "insert-null-checks");
 	    boolean enableRedundantCastInsertion = PhaseOptions.getBoolean(options, "insert-redundant-casts");
 	    String modifierOptions = PhaseOptions.getString(options, "allowed-modifier-changes");
-	    float expansionFactor = PhaseOptions.getFloat(options, "expansion-factor");
-	    int maxContainerSize = PhaseOptions.getInt(options, "max-container-size");
-	    int maxInlineeSize = PhaseOptions.getInt(options, "max-inlinee-size");
-	    boolean rerunJb = PhaseOptions.getBoolean(options, "rerun-jb");
-	    
+
 	    CallGraph cg = Scene.v().getCallGraph();
 	    ArrayList<List<Host>> sitesToInline = new ArrayList<List<Host>>();
 	    computeAverageMethodSizeAndSaveOriginalSizes();
@@ -73,15 +71,13 @@ public class WholeProgramTransformer extends SceneTransformer {
 
 	        while (it.hasPrevious()) {
 	          SootMethod container = it.previous();
-	          //TODO: 这里过滤的结果只inline了输入的文件的函数体，没有考虑其他文件中的inline情况,
-	          //      比如FieldSensitivity中，就没有考虑class A和B的inline
 	          if (methodToOriginalSize.get(container) == null) {
 	            continue;
 	          }
 
-	          if (!container.isConcrete()) {
-	            continue;
-	          }
+	          //这里暴力的把library的方法全部过滤掉是否会出问题呢？
+	          if (container.isJavaLibraryMethod()) continue;
+	          if (!container.isConcrete()) continue;
 
 	          if (!explicitInvokesFilter.wrap(cg.edgesOutOf(container)).hasNext()) {
 	            continue;
@@ -99,19 +95,16 @@ public class WholeProgramTransformer extends SceneTransformer {
 	              continue;
 	            }
 
+	            // 这里先判断过滤完的结果是否存在，再判断是否唯一
 	            Iterator targets = new Targets(explicitInvokesFilter.wrap(cg.edgesOutOf(s)));
-	            if (!targets.hasNext()) {
-	              continue;
-	            }
+	            if (!targets.hasNext()) continue;
 	            SootMethod target = (SootMethod) targets.next();
-	            if (targets.hasNext()) {
-	              continue;
-	            }
-
+	            if (targets.hasNext()) continue;
+	            if (!target.isConcrete()) continue;
+	            //这里确保了只内联applicationClass内的函数
 	            if (!target.getDeclaringClass().isApplicationClass() || !target.isConcrete()) {
-	              continue;
+	                continue;
 	            }
-
 	            if (!InlinerSafetyManager.ensureInlinability(target, s, container, modifierOptions)) {
 	              continue;
 	            }
@@ -120,15 +113,13 @@ public class WholeProgramTransformer extends SceneTransformer {
 	            l.add(target);
 	            l.add(s);
 	            l.add(container);
-
-	            sitesToInline.add(l);
+	        
+	            sitesToInline.add(0, l);
 	          }
 	        }
 	     }
 	    
 	    //利用上面得到的三元组进行inline
-	    //TODO:inline的顺序存在问题，应该把低一级的inline到高一级的才对吧
-	    //TODO:考虑类的关联问题
 	    {
 	        Iterator<List<Host>> sitesIt = sitesToInline.iterator();
 	        while (sitesIt.hasNext()) {
@@ -141,27 +132,10 @@ public class WholeProgramTransformer extends SceneTransformer {
 	          SootMethod container = (SootMethod) l.get(2);
 	          int containerSize = ((JimpleBody) (container.retrieveActiveBody())).getUnits().size();
 
-	          //TODO: 默认的maxContainerSize，和maxInlineeSize为0,会导致无法inline，我需要考虑一个合适的大小
-//	          if (inlineeSize + containerSize > maxContainerSize) {
-//	            continue;
-//	          }
-
-//	          if (inlineeSize > maxInlineeSize) {
-//	            continue;
-//	          }
-	          
-	          //TODO:设置一个比较合适的可拓展比例系数
-//	          if (inlineeSize + containerSize > expansionFactor * methodToOriginalSize.get(container).intValue()) {
-//	            continue;
-//	          }
-
 	          if (InlinerSafetyManager.ensureInlinability(inlinee, invokeStmt, container, modifierOptions)) {
 	            // Not that it is important to check right before inlining if the site is still valid.
 	        	//TODO: soot自带的inline对类的成员变量没有做关联处理！我需要完成这部分的补全
 	            SiteInliner.inlineSite(inlinee, invokeStmt, container, options);
-	            if (rerunJb) {
-	              PackManager.v().getPack("jb").apply(container.getActiveBody());
-	            }
 	          }
 	        }
 	     }
@@ -173,8 +147,14 @@ public class WholeProgramTransformer extends SceneTransformer {
 		TreeMap<Integer, Local> queries = new TreeMap<Integer, Local>();
 		Anderson anderson = new Anderson(); 
 		
+		//TODO: inline会破坏callgraph
+//		this.inlineTransform(arg0, options);	//把applicationClass的函数做inline
 		ReachableMethods reachableMethods = Scene.v().getReachableMethods();
 		QueueReader<MethodOrMethodContext> qr = reachableMethods.listener();		
+		
+		Filter explicitInvokesFilter = new Filter(new ExplicitEdgesPred());
+		//TODO: 1.需要把对象的域与函数调用的参数传递挂接起来
+		//		2.
 		while (qr.hasNext()) {
 			SootMethod sm = qr.next().method();
 			//if (sm.toString().contains("Hello")) {
@@ -187,10 +167,20 @@ public class WholeProgramTransformer extends SceneTransformer {
 
 						if (u instanceof InvokeStmt) { 
 							InvokeExpr ie = ((InvokeStmt) u).getInvokeExpr();
-							//System.out.println(ie);
+							//跳过基本库里面的方法，可能会存在问题
+//							if (ie.getMethod().isJavaLibraryMethod()) continue;
+//							Iterator<Edge> edges = explicitInvokesFilter.wrap(Scene.v().getCallGraph().edgesOutOf(sm));
+//							int edge_id = 0;
+//							while (edges.hasNext()) {
+//								Edge e = edges.next();
+//								System.out.println(edge_id + "\t" + e.toString());
+//								edge_id++;
+//							}
+							//标注
 							if (ie.getMethod().toString().equals("<benchmark.internal.Benchmark: void alloc(int)>")) {
 								allocId = ((IntConstant)ie.getArgs().get(0)).value;
 							}
+							//测试
 							if (ie.getMethod().toString().equals("<benchmark.internal.Benchmark: void test(int,java.lang.Object)>")) {
 								Value v = ie.getArgs().get(1);
 								int id = ((IntConstant)ie.getArgs().get(0)).value;
@@ -213,7 +203,6 @@ public class WholeProgramTransformer extends SceneTransformer {
 				}
 			//}
 		}
-		this.inlineTransform(arg0, options);
 	    
 		System.out.println("Start anderson checking.");
 		anderson.run();
@@ -233,48 +222,103 @@ public class WholeProgramTransformer extends SceneTransformer {
 		
 	}
 	
+	private HashMap<SootField, TreeSet<JInstanceFieldRef>> fieldReferMap = new HashMap<SootField, TreeSet<JInstanceFieldRef>>();
+	
+	private void buildCallMethodConstrain(InvokeExpr ie, Anderson anderson, int allocId) {
+        SootMethod sm = ie.getMethod();
+        if (!sm.hasActiveBody()) return;
+        if (!Scene.v().getReachableMethods().contains(sm)) return;
+        
+		SootClass c = sm.getDeclaringClass();
+		Iterator<SootField> it = c.getFields().iterator();
+		while (it.hasNext()) {
+			fieldReferMap.put(it.next(), new TreeSet<JInstanceFieldRef>());
+		}
+		for (Unit u : sm.getActiveBody().getUnits()) {
+			if (u instanceof DefinitionStmt) {
+				//TODO: 这里需要做的是把全局变量的修改结果和container的使用挂接起来
+			}
+		}
+	}
+	
 	//保存原始的jimple文件的函数对应的代码长度
 	private final HashMap<SootMethod, Integer> methodToOriginalSize = new HashMap<SootMethod, Integer>();
 
-	//TODO:这里只使用了applicationClass的，实际上也可能会
-	private void computeAverageMethodSizeAndSaveOriginalSizes() {
-		long sum = 0, count = 0;
-		Scene scene_v = Scene.v();
-		Iterator classesIt = Scene.v().getApplicationClasses().iterator();
+	//把可能需要inline的函数都填写进来并统计长度
+	  private void computeAverageMethodSizeAndSaveOriginalSizes() {
+	    long sum = 0, count = 0;
+	    Iterator classesIt = Scene.v().getApplicationClasses().iterator();
 
-		while (classesIt.hasNext()) {
-			SootClass c = (SootClass) classesIt.next();
-			Iterator methodsIt = c.methodIterator();
-			while (methodsIt.hasNext()) {
-				SootMethod m = (SootMethod) methodsIt.next();
-		        if (m.isConcrete()) {
-		          Chain<SootClass> refClasses = this.getRefClasses(m, c);
-		          int size = ((JimpleBody) m.retrieveActiveBody()).getUnits().size();
-		          sum += size;
-		          methodToOriginalSize.put(m, new Integer(size));
-		          count++;
-		        }
-			}
-		}
-		if (count == 0) {
-			return;
-		}
-	}
+	    while (classesIt.hasNext()) {
+	      SootClass c = (SootClass) classesIt.next();
 
-	//把除了包含本函数的所有调用到的类都添加进来
-	//TODO: 需要过滤处理一下标准库的类，比如System.out
-	private Chain<SootClass> getRefClasses(SootMethod m, SootClass referingClass) {
-		Chain<SootClass> refClasses = new HashChain<SootClass>();
-		for (Unit u: m.getActiveBody().getUnits()) {
-			if (u instanceof InvokeStmt) {
-				//需要exclude本身的类
-				SootMethod method = ((InvokeStmt) u).getInvokeExpr().getMethod();
-				List<Value> args =  ((InvokeStmt) u).getInvokeExpr().getArgs();
-				SootClass refClass = method.getDeclaringClass();
-				if (refClass.equals(referingClass)) continue;
-				if (!refClasses.contains(refClass)) refClasses.add(refClass);
-			}
-		}
-		return refClasses;
-	}
+	      Iterator methodsIt = c.methodIterator();
+	      while (methodsIt.hasNext()) {
+	        SootMethod m = (SootMethod) methodsIt.next();
+	        if (m.isConcrete()) {
+	          int size = ((JimpleBody) m.retrieveActiveBody()).getUnits().size();
+	          sum += size;
+	          methodToOriginalSize.put(m, new Integer(size));
+	          count++;
+	        }
+	      }
+	    }
+	    if (count == 0) {
+	      return;
+	    }
+	  }
+//	private void computeAverageMethodSizeAndSaveOriginalSizes() {
+//		long sum = 0, count = 0;
+//		Scene scene_v = Scene.v();
+//		Iterator classesIt = Scene.v().getApplicationClasses().iterator();
+//		Chain<SootClass> refClassSet = new HashChain<SootClass>();
+//		Chain<SootClass> checkedClassSet = new HashChain<SootClass>();
+//		boolean appHasNext = classesIt.hasNext(),
+//				isRefClassSetEmpty = refClassSet.isEmpty();
+//		while (appHasNext || !isRefClassSetEmpty) {
+//			SootClass c;
+//			if (appHasNext) c = (SootClass) classesIt.next();
+//			else {
+//				c = refClassSet.getFirst();
+//				refClassSet.removeFirst();
+//			}
+//			Iterator methodsIt = c.methodIterator();
+//			while (methodsIt.hasNext()) {
+//				SootMethod m = (SootMethod) methodsIt.next();
+//		        if (m.isConcrete()) {
+//		          Chain<SootClass> refClasses = this.getRefClasses(m, c);
+//		          for (SootClass refClass : refClasses) {
+//		        	  if (refClassSet.contains(refClass) || checkedClassSet.contains(refClass)) continue;
+//		        	  refClassSet.add(refClass);
+//		          }
+//		          int size = ((JimpleBody) m.retrieveActiveBody()).getUnits().size();
+//		          sum += size;
+//		          methodToOriginalSize.put(m, new Integer(size));
+//		          count++;
+//		        }
+//			}
+//			checkedClassSet.add(c);
+//			appHasNext = classesIt.hasNext();
+//			isRefClassSetEmpty = refClassSet.isEmpty();
+//		}
+//		if (count == 0) {
+//			return;
+//		}
+//	}
+
+//	private Chain<SootClass> getRefClasses(SootMethod m, SootClass referingClass) {
+//		Chain<SootClass> refClasses = new HashChain<SootClass>();
+//		if (m.hasActiveBody()) {
+//			for (Unit u: m.getActiveBody().getUnits()) {
+//				if (u instanceof InvokeStmt) {
+//					SootMethod method = ((InvokeStmt) u).getInvokeExpr().getMethod();
+//					List<Value> args =  ((InvokeStmt) u).getInvokeExpr().getArgs();
+//					SootClass refClass = method.getDeclaringClass();
+//					if (refClass.equals(referingClass)) continue;
+//					if (!refClasses.contains(refClass)) refClasses.add(refClass);
+//				}
+//			}
+//		}
+//		return refClasses;
+//	}
 }
