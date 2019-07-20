@@ -79,23 +79,23 @@ class ParamConstraint implements Comparable<ParamConstraint>{
 		if (methodReturnLocals.containsKey(sm)) returnLocals = methodReturnLocals.get(sm);
 		else returnLocals = new ArrayList<Local>();
 		returnLocals.add(local);
-		methodReturnLocals.put(sm, (ArrayList<Local>) local);
+		methodReturnLocals.put(sm, (ArrayList<Local>) returnLocals);
 	}
 	
 	int callId;
 	SootMethod method;
 	Local local;
-	//index用于表示数据占参数列表的第几位，如果index为null表示调用的函数
-	int index;
+	int index;	//不妨使index为-1时代表返回的目标local
 	boolean bias;	//用于表示call_args 与 method_args的方向
+	boolean isPrimType;	 //true表示值传递，不需要加上隐含赋值语句; false引用传递，访问同一地址，需要加上隐含的返回赋值。
 	
-	//不妨使index为-1时代表返回的目标local
-	ParamConstraint(SootMethod method, int callId, int index, boolean bias, Local local) {
+	ParamConstraint(SootMethod method, int callId, int index, boolean bias, Local local, boolean isPrimType) {
 		this.method = method;
 		this.index = index;
 		this.callId = callId;
 		this.bias = bias;
 		this.local = local;
+		this.isPrimType = isPrimType;
 	}
 
 	@Override
@@ -110,14 +110,12 @@ class ConditionInteger implements Comparable<ConditionInteger> {
 	SootMethod sm;
 	int condition;
 	public ConditionInteger(int value, SootMethod sm, int condition) {
-		// TODO Auto-generated constructor stub
 		this.value = value;
 		this.sm = sm;
 		this.condition = condition;
 	}
 	@Override
 	public int compareTo(ConditionInteger o) {
-		// TODO Auto-generated method stub
 		if (this.condition > o.condition) return 1;
 		else if (this.condition < o.condition) return -1;
 		else return this.value - o.value;
@@ -149,8 +147,7 @@ class ConditionLocal {
 public class Anderson {
 	private List<AssignConstraint> assignConstraintList = new ArrayList<AssignConstraint>();
 	private List<NewConstraint> newConstraintList = new ArrayList<NewConstraint>();
-	//TODO: 1.加上函数参数传递的constraint
-	//		2.全局变量传递的constraint
+	//TODO: 全局变量传递的constraint
 //	private List<ParamConstraint> paramConstraintList = new ArrayList<ParamConstraint>();
 	private Map<SootMethod, ArrayList<ParamConstraint>> paramConstraintMap = 
 			new HashMap<SootMethod, ArrayList<ParamConstraint>>();
@@ -165,14 +162,15 @@ public class Anderson {
 	void addNewConstraint(int alloc, Local to) {
 		newConstraintList.add(new NewConstraint(alloc, to));		
 	}
-	void addParamConstraint(SootMethod sm, int callId, int index, boolean bias, Local local) {
+	void addParamConstraint(SootMethod sm, int callId, int index, boolean bias, Local local, boolean isPrimType) {
 		List<ParamConstraint> paramConstraintList;
 		if (paramConstraintMap.containsKey(sm)) {
 			paramConstraintList = paramConstraintMap.get(sm);
 		} else {
 			paramConstraintList = new ArrayList<ParamConstraint>(); 
 		}
-		paramConstraintList.add(new ParamConstraint(sm, callId, index, bias, local));
+		paramConstraintList.add(new ParamConstraint(sm, callId, index, bias, local, isPrimType));
+		paramConstraintMap.put(sm, (ArrayList<ParamConstraint>) paramConstraintList);
 	}
 	
 	void run() {
@@ -199,24 +197,33 @@ public class Anderson {
 			for (ParamConstraint pc : lpc) {
 				if (pc.callId == 0 && !pc.bias) {
 					pattern_args.put(pc.index, pc.local);
-				} else if (pc.callId == 0 && pc.bias) {
-					returnLocal = pc.local;
-				}
+				} 
+
 			}
 			for (ParamConstraint pc : lpc) {
-				if (pc.callId == 0) continue;
+				if (pc.bias && pc.index == -1) {
+					returnLocal = pc.local;
+				}
+				if (pc.callId == 0 || pc.index == -1) continue;
 				ConditionLocal cl = new ConditionLocal(pc.local, sm, pc.callId);
 				this.addAssignConstraint(cl, 
 						new ConditionLocal(pattern_args.get(pc.index), sm, pc.callId));
+				if (!pc.isPrimType) { //引用类型需要把情况全部同步
+					this.addAssignConstraint(new ConditionLocal(pattern_args.get(pc.index), sm, pc.callId), cl);
+				}
 				List<Local> methodReturnLocals = ParamConstraint.getMethodReturnLocals(sm);
+				if (methodReturnLocals == null) continue;
 				for (Local l : methodReturnLocals) {
 					for (int i = 1; i <= ParamConstraint.getPresentCallId(sm); ++i) {
 						this.addAssignConstraint(new ConditionLocal(l, sm, i), 
-								new ConditionLocal(returnLocal, sm, pc.callId));					
+								new ConditionLocal(returnLocal, sm, pc.callId));				
 					}
 				}
 			}
 		}
+		
+//		paramConstraintMap.clear();
+		System.out.println("All assignConstraint size: " + assignConstraintList.size());
 		
 		for (boolean flag = true; flag; ) {
 			flag = false;
@@ -229,7 +236,9 @@ public class Anderson {
 				}
 				Local to = ac.to.local;
 				//如果是函数调用返回值
-				if (ParamConstraint.getMethodCallLocals(ac.from.sm).contains(to)) {
+				TreeSet<Local> methodCallLocals = ParamConstraint.getMethodCallLocals(ac.from.sm);
+				if (methodCallLocals == null) continue;
+				if (methodCallLocals.contains(to)) {
 					Iterator<ConditionInteger> fit = pts.get(ac.from.local).iterator();
 					while (fit.hasNext()) {
 						ConditionInteger fci = fit.next();
@@ -248,7 +257,8 @@ public class Anderson {
 	}
 	
 	TreeSet<Integer> getPointsToSet(Local local) {
-		return ConditionInteger.transferCondIntToIngeter(pts.get(local));
+		TreeSet<ConditionInteger> cit = pts.get(local);
+		return ConditionInteger.transferCondIntToIngeter(cit);
 	}
 	
 }
