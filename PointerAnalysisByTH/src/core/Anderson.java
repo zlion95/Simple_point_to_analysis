@@ -1,64 +1,254 @@
 package core;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
 
 import soot.Local;
+import soot.SootMethod;
+import soot.SootMethodRef;
+import soot.Type;
+import soot.jimple.ParameterRef;
+import soot.jimple.internal.JimpleLocal;
 
 class AssignConstraint {
-	Local from, to;
-	AssignConstraint(Local from, Local to) {
-		this.from = from;
-		this.to = to;
+	ConditionLocal from, to;
+	int callId = -1;
+	AssignConstraint(ConditionLocal cl, ConditionLocal conditionLocal) {
+		this.from = cl;
+		this.to = conditionLocal;
 	}
 }
 
 class NewConstraint {
 	Local to;
 	int allocId;
+	int callId = -1;
 	NewConstraint(int allocId, Local to) {
 		this.allocId = allocId;
 		this.to = to;
 	}
 }
 
+class ParamConstraint implements Comparable<ParamConstraint>{
+	static Map<SootMethod, Integer> methodCallId = new HashMap<SootMethod, Integer>();
+	static Map<SootMethod, TreeSet<Local>> methodCallAssignLocals = 
+			new HashMap<SootMethod, TreeSet<Local>>();
+	static Map<SootMethod, ArrayList<Local>> methodReturnLocals 
+	= new HashMap<SootMethod, ArrayList<Local>>();
+	
+	public static void addCallMethodLocal(SootMethod method, Local local) {
+		TreeSet<Local> locals;
+		if (methodCallAssignLocals.containsKey(method)) locals = methodCallAssignLocals.get(method);
+		else locals = new TreeSet<Local>();
+		locals.add(local);
+		methodCallAssignLocals.put(method, locals);
+	}
+	public static TreeSet<Local> getMethodCallLocals(SootMethod sm) {
+		return methodCallAssignLocals.get(sm);
+	}
+	public static void addMethod(SootMethod method) {
+		//从1开始是调用函数的语句的constraint，0用来存放函数本身的constraint
+		if (!methodCallId.containsKey(method)) methodCallId.put(method, 1);
+	}
+	
+	public static List<Local> getMethodReturnLocals(SootMethod sm) {
+		return methodReturnLocals.get(sm);
+	}
+	
+	public static int getPresentCallId(SootMethod method) {
+		if (!methodCallId.containsKey(method)) return 0;
+		return methodCallId.get(method);
+	}
+	
+	public static int getMethodCallId(SootMethod method) {
+		if (!methodCallId.containsKey(method)) addMethod(method);
+		int id = methodCallId.get(method);
+		methodCallId.put(method, id + 1);
+		return id;
+	}
+	
+	// 0 0 1 1 2 2 。。。M M 
+	public static void addMethodReturnLocals(SootMethod sm, Local local) {
+		List<Local> returnLocals;
+		if (methodReturnLocals.containsKey(sm)) returnLocals = methodReturnLocals.get(sm);
+		else returnLocals = new ArrayList<Local>();
+		returnLocals.add(local);
+		methodReturnLocals.put(sm, (ArrayList<Local>) local);
+	}
+	
+	int callId;
+	SootMethod method;
+	Local local;
+	//index用于表示数据占参数列表的第几位，如果index为null表示调用的函数
+	int index;
+	boolean bias;	//用于表示call_args 与 method_args的方向
+	
+	//不妨使index为-1时代表返回的目标local
+	ParamConstraint(SootMethod method, int callId, int index, boolean bias, Local local) {
+		this.method = method;
+		this.index = index;
+		this.callId = callId;
+		this.bias = bias;
+		this.local = local;
+	}
+
+	@Override
+	public int compareTo(ParamConstraint o) {
+		return this.callId - o.callId;
+	}
+}
+
+class ConditionInteger implements Comparable<ConditionInteger> {
+
+	int value;
+	SootMethod sm;
+	int condition;
+	public ConditionInteger(int value, SootMethod sm, int condition) {
+		// TODO Auto-generated constructor stub
+		this.value = value;
+		this.sm = sm;
+		this.condition = condition;
+	}
+	@Override
+	public int compareTo(ConditionInteger o) {
+		// TODO Auto-generated method stub
+		if (this.condition > o.condition) return 1;
+		else if (this.condition < o.condition) return -1;
+		else return this.value - o.value;
+	}
+	
+	public static TreeSet<Integer> transferCondIntToIngeter(TreeSet<ConditionInteger> cit) {
+		Iterator<ConditionInteger> it = cit.iterator();
+		TreeSet<Integer> is = new TreeSet<Integer>();
+		while (it.hasNext()) {
+			ConditionInteger ci = it.next();
+			is.add(ci.value);
+		}
+		return is;
+	}
+}
+
+class ConditionLocal {
+	Local local;
+	SootMethod sm;
+	int condition;
+	public ConditionLocal(Local local, SootMethod sm, int condition) {
+		this.local = local;
+		this.sm = sm;
+		this.condition = condition;
+	}
+	
+}
+
 public class Anderson {
 	private List<AssignConstraint> assignConstraintList = new ArrayList<AssignConstraint>();
 	private List<NewConstraint> newConstraintList = new ArrayList<NewConstraint>();
-	Map<Local, TreeSet<Integer>> pts = new HashMap<Local, TreeSet<Integer>>();
+	//TODO: 1.加上函数参数传递的constraint
+	//		2.全局变量传递的constraint
+//	private List<ParamConstraint> paramConstraintList = new ArrayList<ParamConstraint>();
+	private Map<SootMethod, ArrayList<ParamConstraint>> paramConstraintMap = 
+			new HashMap<SootMethod, ArrayList<ParamConstraint>>();
+	Map<Local, TreeSet<ConditionInteger>> pts = new HashMap<Local, TreeSet<ConditionInteger>>();
+	void addAssignConstraint(ConditionLocal cl, ConditionLocal conditionLocal) {
+		assignConstraintList.add(new AssignConstraint(cl, conditionLocal));
+	}
 	void addAssignConstraint(Local from, Local to) {
-		assignConstraintList.add(new AssignConstraint(from, to));
+		assignConstraintList.add(new AssignConstraint(
+				new ConditionLocal(from, null, 0), new ConditionLocal(to, null, 0)));
 	}
 	void addNewConstraint(int alloc, Local to) {
 		newConstraintList.add(new NewConstraint(alloc, to));		
 	}
+	void addParamConstraint(SootMethod sm, int callId, int index, boolean bias, Local local) {
+		List<ParamConstraint> paramConstraintList;
+		if (paramConstraintMap.containsKey(sm)) {
+			paramConstraintList = paramConstraintMap.get(sm);
+		} else {
+			paramConstraintList = new ArrayList<ParamConstraint>(); 
+		}
+		paramConstraintList.add(new ParamConstraint(sm, callId, index, bias, local));
+	}
+	
 	void run() {
 		for (NewConstraint nc : newConstraintList) {
+			ConditionInteger ncci = new ConditionInteger(nc.allocId, null, 0);
 			if (!pts.containsKey(nc.to)) {
-				pts.put(nc.to, new TreeSet<Integer>());
+				pts.put(nc.to, new TreeSet<ConditionInteger>());
 			}
-			pts.get(nc.to).add(nc.allocId);
+			pts.get(nc.to).add(ncci);
 		}
+		
+		//Transfer paramConstraint to assignConstraint
+		//TODO:需要测试
+		Iterator<SootMethod> ipc = paramConstraintMap.keySet().iterator();
+		while (ipc.hasNext()) {
+			SootMethod sm = ipc.next();
+			List<ParamConstraint> lpc = paramConstraintMap.get(sm);
+			if (lpc.isEmpty()) continue;
+			lpc.sort(null);
+			
+			Map<Integer, Local> pattern_args = new HashMap<Integer, Local>();
+			Local returnLocal = null;
+			//Find parameters and return-to local
+			for (ParamConstraint pc : lpc) {
+				if (pc.callId == 0 && !pc.bias) {
+					pattern_args.put(pc.index, pc.local);
+				} else if (pc.callId == 0 && pc.bias) {
+					returnLocal = pc.local;
+				}
+			}
+			for (ParamConstraint pc : lpc) {
+				if (pc.callId == 0) continue;
+				ConditionLocal cl = new ConditionLocal(pc.local, sm, pc.callId);
+				this.addAssignConstraint(cl, 
+						new ConditionLocal(pattern_args.get(pc.index), sm, pc.callId));
+				List<Local> methodReturnLocals = ParamConstraint.getMethodReturnLocals(sm);
+				for (Local l : methodReturnLocals) {
+					for (int i = 1; i <= ParamConstraint.getPresentCallId(sm); ++i) {
+						this.addAssignConstraint(new ConditionLocal(l, sm, i), 
+								new ConditionLocal(returnLocal, sm, pc.callId));					
+					}
+				}
+			}
+		}
+		
 		for (boolean flag = true; flag; ) {
 			flag = false;
 			for (AssignConstraint ac : assignConstraintList) {
-				if (!pts.containsKey(ac.from)) {
+				if (!pts.containsKey(ac.from.local)) {
 					continue;
-				}	
-				if (!pts.containsKey(ac.to)) {
-					pts.put(ac.to, new TreeSet<Integer>());
 				}
-				if (pts.get(ac.to).addAll(pts.get(ac.from))) {
-					flag = true;
+				if (!pts.containsKey(ac.to.local)) {
+					pts.put(ac.to.local, new TreeSet<ConditionInteger>());
+				}
+				Local to = ac.to.local;
+				//如果是函数调用返回值
+				if (ParamConstraint.getMethodCallLocals(ac.from.sm).contains(to)) {
+					Iterator<ConditionInteger> fit = pts.get(ac.from.local).iterator();
+					while (fit.hasNext()) {
+						ConditionInteger fci = fit.next();
+						if (fci.condition == ac.to.condition) {
+							flag &= pts.get(ac.to.local).add(new ConditionInteger(fci.value, ac.to.sm, 0));
+						}
+					}
+				} else {
+					//非函数返回值
+					if (pts.get(ac.to.local).addAll(pts.get(ac.from.local))) {
+						flag = true;
+					}
 				}
 			}
 		}
 	}
+	
 	TreeSet<Integer> getPointsToSet(Local local) {
-		return pts.get(local);
+		return ConditionInteger.transferCondIntToIngeter(pts.get(local));
 	}
 	
 }

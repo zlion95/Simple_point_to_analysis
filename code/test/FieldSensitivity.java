@@ -16,13 +16,14 @@ import benchmark.objects.B;
  */
 
 class TestClass {
-    private int seed = 0;
+    public int seed = 0;
     public TestClass(int i) {
         this.seed = i;
     }
     public int getSeed() {
         return this.seed;
     }
+
 }
 
 public class FieldSensitivity {
@@ -47,11 +48,15 @@ public class FieldSensitivity {
     this.seed = 5;
     assign(a, c);
     B d = c.f;
+    Benchmark.test(1, d); // expected: 1
 
     TestClass testClass = new TestClass(10);
     System.out.println(testClass.getSeed());
+    testClass.seed = 6;
+    int result = testClass.getSeed();
+    System.out.println(result);
 
-    Benchmark.test(1, d); // expected: 1
+
   }
 
   public static void main(String[] args) {
